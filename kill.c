@@ -13,6 +13,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <libnotify/notify.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include "kill.h"
 #include "meminfo.h"
@@ -44,10 +48,99 @@ static int isnumeric(char* str)
     }
 }
 
+
+char DBUS_SESSION_BUS_ADDRESS[1024];
+int  DBUS_SESSION_BUS_ADDRESS_vaild = 0;
+
+static void try_get_dbus_session_bus_address(){
+    DIR *dir;
+    struct dirent *ent;
+    if ((dir = opendir("/proc")) != NULL) {
+        while ((ent = readdir(dir)) != NULL) {
+            char exe_path[1024] = "/proc/";
+            strncat(exe_path, ent->d_name, 1024);
+            strncat(exe_path, "/exe", 1024);
+            char buf[1024] = "";
+            if(readlink(exe_path, buf, 1024)<0){
+                continue;
+            }
+            if(strncmp(buf, "/usr/bin/dde-desktop", 1024)!=0){
+                continue;
+            }
+            char env_path[1024] = "/proc/";
+            strncat(env_path, ent->d_name, 1024);
+            strncat(env_path, "/environ", 1024);
+            int fd;
+            if((fd = open(env_path, O_RDONLY))>=0){
+                // off_t f_size = lseek(fd, 0, SEEK_END);
+                off_t f_size = 10240;
+                char* p = (char*)malloc(f_size);
+                memset(p, 0, f_size);
+                // lseek(fd, 0, SEEK_SET);
+                ssize_t r_len = read(fd, p, f_size);
+                ssize_t cur = 0;
+                char target[] = "DBUS_SESSION_BUS_ADDRESS=";
+                ssize_t target_len = sizeof(target);
+                ssize_t last_pos = r_len - target_len;
+                while(cur<last_pos){
+                    while(cur<last_pos&&p[cur]==0)cur++;
+                    if(memcmp(target, p+cur, target_len-1)==0){
+                        ssize_t start_pos = cur+target_len -1;
+                        ssize_t end_pos = start_pos+1;
+                        while(end_pos<r_len && p[end_pos]!=0) end_pos ++;
+                        if(end_pos - start_pos<1024){
+                            memcpy(DBUS_SESSION_BUS_ADDRESS, p+start_pos, end_pos-start_pos);
+                            DBUS_SESSION_BUS_ADDRESS[end_pos-start_pos]=0;
+                            printf("DBUS_SESSION_BUS_ADDRESS=%s\n",DBUS_SESSION_BUS_ADDRESS);
+                            DBUS_SESSION_BUS_ADDRESS_vaild=1;
+                        }
+                        break;
+                    }
+                    cur++;
+                }
+                free(p);
+                close(fd);
+                break;
+            }
+        }
+        closedir (dir);
+    }
+}
+
+
 static void maybe_notify(char* notif_command, char* notif_args)
 {
-    if (!notif_command)
+    if (!notif_command) {
+        if(!DBUS_SESSION_BUS_ADDRESS_vaild){
+            try_get_dbus_session_bus_address();
+            if(!DBUS_SESSION_BUS_ADDRESS_vaild){
+                warn("DBUS_SESSION_BUS_ADDRESS_invaild");
+                return;
+            }
+        }
+        if(seteuid(1000)<0) {
+            warn("seteuid failed");
+            return;
+        }
+        // DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/X_userid/bus
+        if(setenv("DISPLAY", ":0", 1)<0) {
+            warn("setenv DISPLAY failed");
+            return;
+        }
+        if(setenv("DBUS_SESSION_BUS_ADDRESS", DBUS_SESSION_BUS_ADDRESS, 1)<0) {
+            warn("setenv DBUS_SESSION_BUS_ADDRESS failed");
+            return;
+        }
+        notify_init("EarlyOOM");
+        NotifyNotification* warn_msg = notify_notification_new("EarlyOOM", notif_args, "dialog-information");
+        notify_notification_show(warn_msg, NULL);
+        g_object_unref(G_OBJECT(warn_msg));
+        notify_uninit();
+        if(seteuid(0) < 0) {
+            warn("seteuid faile");
+        }
         return;
+    }
 
     char notif[PATH_MAX + 2000];
     snprintf(notif, sizeof(notif), "%s %s", notif_command, notif_args);
@@ -108,6 +201,7 @@ int kill_wait(const poll_loop_args_t args, pid_t pid, int sig)
  */
 void kill_largest_process(const poll_loop_args_t args, int sig)
 {
+    // maybe_notify(NULL, "test");
     struct dirent* d;
     char buf[256];
     int pid;

@@ -1,5 +1,7 @@
 VERSION ?= $(shell git describe --tags --dirty 2> /dev/null)
 CFLAGS += -Wall -Wextra -DVERSION=\"$(VERSION)\" -g -fstack-protector-all -std=gnu99
+CFLAGS += $(shell pkg-config --cflags libnotify)
+LDFLAGS = $(shell pkg-config --libs libnotify)
 
 DESTDIR ?=
 PREFIX ?= /usr/local
